@@ -1,0 +1,11 @@
+{
+    "display_name": "Gemini & Claude Additional Parameters",
+    "loading_order": 101,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "User",
+    "version": "1.0.0",
+    "homePage": ""
+}

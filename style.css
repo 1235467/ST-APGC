@@ -1,0 +1,29 @@
+.gcap--popup {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    gap: 8px;
+}
+
+.gcap--popup h3 {
+    margin: 0;
+}
+
+.gcap--popup .gcap--section {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.gcap--popup .gcap--section h4 {
+    margin: 4px 0;
+}
+
+.gcap--popup .gcap--section textarea {
+    flex: 1;
+    resize: vertical;
+    min-height: 80px;
+    font-family: var(--monoFontFamily, monospace);
+    font-size: 0.9em;
+}
