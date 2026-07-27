@@ -1,5 +1,5 @@
 {
-    "display_name": "Gemini & Claude Additional Parameters",
+    "display_name": "Chat Completion Additional Parameters",
     "loading_order": 101,
     "requires": [],
     "optional": [],

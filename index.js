@@ -1,227 +1,278 @@
-import { saveSettingsDebounced } from '../../../../script.js';
 import { extension_settings } from '../../../extensions.js';
-import { oai_settings, chat_completion_sources } from '../../../openai.js';
+import { oai_settings } from '../../../openai.js';
 import { callGenericPopup, POPUP_TYPE, POPUP_RESULT } from '../../../popup.js';
-import { eventSource, event_types } from '../../../events.js';
-import { yaml } from '../../../../lib.js';
+import { translate } from '../../../i18n.js';
+import { parse as parseYaml } from './vendor/yaml.js';
 
-// =============================================
-// Settings
-// =============================================
+const SETTINGS_KEY = 'gcAdditionalParams';
+const SETTINGS_FIELDS = ['include_body', 'exclude_body', 'include_headers'];
 
-const defaultSettings = {
-    claude: {
-        include_body: '',
-        exclude_body: '',
-        include_headers: '',
+/**
+ * Each entry owns one persisted settings object. Google AI Studio and Vertex AI
+ * deliberately share the `google` object, while every other source is isolated.
+ */
+const PROVIDERS = [
+    {
+        key: 'claude',
+        sources: [{ value: 'claude', label: 'Claude' }],
     },
-    google: {
-        include_body: '',
-        exclude_body: '',
-        include_headers: '',
+    {
+        key: 'google',
+        sources: [
+            { value: 'makersuite', label: 'Google AI Studio' },
+            { value: 'vertexai', label: 'Vertex AI' },
+        ],
     },
-};
+    {
+        key: 'deepseek',
+        sources: [{ value: 'deepseek', label: 'DeepSeek' }],
+    },
+    {
+        key: 'zai',
+        sources: [{ value: 'zai', label: 'Z.AI' }],
+    },
+    {
+        key: 'moonshot',
+        sources: [{ value: 'moonshot', label: 'Moonshot AI' }],
+    },
+    {
+        key: 'xai',
+        sources: [{ value: 'xai', label: 'xAI' }],
+    },
+    {
+        key: 'openrouter',
+        sources: [{ value: 'openrouter', label: 'OpenRouter' }],
+    },
+];
 
-const settings = structuredClone(defaultSettings);
-Object.assign(settings, extension_settings.gcAdditionalParams ?? {});
-if (!settings.claude) settings.claude = structuredClone(defaultSettings.claude);
-if (!settings.google) settings.google = structuredClone(defaultSettings.google);
+let saveSettingsDebounced;
+let additionalParametersButton;
+
+function isPlainObject(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function getSettings() {
+    const storedSettings = extension_settings[SETTINGS_KEY];
+    const settings = isPlainObject(storedSettings) ? storedSettings : {};
+
+    for (const provider of PROVIDERS) {
+        if (!isPlainObject(settings[provider.key])) {
+            settings[provider.key] = {};
+        }
+
+        for (const field of SETTINGS_FIELDS) {
+            if (settings[provider.key][field] === undefined) {
+                settings[provider.key][field] = '';
+            }
+        }
+    }
+
+    return settings;
+}
+
+const settings = getSettings();
 
 function saveSettings() {
-    extension_settings.gcAdditionalParams = settings;
+    extension_settings[SETTINGS_KEY] = settings;
     saveSettingsDebounced();
 }
 
-// =============================================
-// YAML helpers
-// =============================================
+function parseYamlObject(yamlString) {
+    if (!yamlString || !yamlString.trim()) {
+        return {};
+    }
 
-function parseYamlObject(yamlStr) {
-    if (!yamlStr || !yamlStr.trim()) return {};
     try {
-        const parsed = yaml.parse(yamlStr);
-        return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {};
-    } catch (e) {
-        console.warn('[GCAP] Failed to parse YAML object:', e);
+        const parsed = parseYaml(yamlString);
+        return isPlainObject(parsed) ? parsed : {};
+    } catch (error) {
+        console.warn('[GCAP] Failed to parse YAML object:', error);
         return {};
     }
 }
 
-function parseYamlArray(yamlStr) {
-    if (!yamlStr || !yamlStr.trim()) return [];
+function parseYamlArray(yamlString) {
+    if (!yamlString || !yamlString.trim()) {
+        return [];
+    }
+
     try {
-        const parsed = yaml.parse(yamlStr);
-        if (Array.isArray(parsed)) return parsed.map(String);
-        return yamlStr.split('\n').map(s => s.replace(/^-\s*/, '').trim()).filter(Boolean);
-    } catch (e) {
-        console.warn('[GCAP] Failed to parse YAML array:', e);
-        return yamlStr.split('\n').map(s => s.replace(/^-\s*/, '').trim()).filter(Boolean);
+        const parsed = parseYaml(yamlString);
+        if (Array.isArray(parsed)) {
+            return parsed.map(String);
+        }
+    } catch (error) {
+        console.warn('[GCAP] Failed to parse YAML array:', error);
+    }
+
+    return yamlString
+        .split('\n')
+        .map(line => line.replace(/^-\s*/, '').trim())
+        .filter(Boolean);
+}
+
+function getCurrentProvider() {
+    const currentSource = oai_settings.chat_completion_source;
+    return PROVIDERS.find(provider => provider.sources.some(source => source.value === currentSource)) ?? null;
+}
+
+function getCurrentProviderLabel(provider) {
+    const currentSource = oai_settings.chat_completion_source;
+    return provider.sources.find(source => source.value === currentSource)?.label ?? provider.sources[0].label;
+}
+
+function refreshButtonVisibility() {
+    if (additionalParametersButton) {
+        additionalParametersButton.hidden = !getCurrentProvider();
     }
 }
 
-// =============================================
-// Provider → source mapping
-// =============================================
-
-const providerSourceMap = {
-    claude: [chat_completion_sources.CLAUDE],
-    google: [chat_completion_sources.MAKERSUITE, chat_completion_sources.VERTEXAI],
-};
-
-function getCurrentProviderKey() {
-    const src = oai_settings.chat_completion_source;
-    for (const [key, sources] of Object.entries(providerSourceMap)) {
-        if (sources.includes(src)) return /** @type {'claude'|'google'} */ (key);
-    }
-    return null;
-}
-
-// =============================================
-// Intercept generate_data
-// =============================================
-
-eventSource.on(event_types.CHAT_COMPLETION_SETTINGS_READY, (/** @type {object} */ generateData) => {
-    const providerKey = getCurrentProviderKey();
-    if (!providerKey) return;
-
-    const cfg = settings[providerKey];
-    if (!cfg) return;
-
-    const includeObj = parseYamlObject(cfg.include_body);
-    if (Object.keys(includeObj).length) {
-        Object.assign(generateData, includeObj);
-        console.debug('[GCAP] Merged include_body into generate_data:', includeObj);
+function applyAdditionalParameters(generateData) {
+    const provider = getCurrentProvider();
+    if (!provider) {
+        return;
     }
 
-    const excludeKeys = parseYamlArray(cfg.exclude_body);
-    for (const key of excludeKeys) {
+    const config = settings[provider.key];
+    if (!config) {
+        return;
+    }
+
+    const includeObject = parseYamlObject(config.include_body);
+    if (Object.keys(includeObject).length) {
+        Object.assign(generateData, includeObject);
+        console.debug('[GCAP] Merged include_body into generate_data:', includeObject);
+    }
+
+    for (const key of parseYamlArray(config.exclude_body)) {
         if (key in generateData) {
             delete generateData[key];
             console.debug('[GCAP] Excluded key from generate_data:', key);
         }
     }
 
-    if (cfg.include_headers && cfg.include_headers.trim()) {
-        generateData.custom_include_headers = cfg.include_headers;
+    if (config.include_headers && config.include_headers.trim()) {
+        generateData.custom_include_headers = config.include_headers;
         console.debug('[GCAP] Set custom_include_headers on generate_data');
     }
-});
+}
 
-// =============================================
-// Popup builder
-// =============================================
+function createSection(titleKey, descriptionKey, rows, value) {
+    const section = document.createElement('div');
+    section.classList.add('gcap--section');
 
-function getProviderLabel() {
-    const key = getCurrentProviderKey();
-    if (key === 'claude') return 'Claude';
-    if (key === 'google') return 'Google';
-    // Fallback: detect from oai_settings directly
-    const src = oai_settings.chat_completion_source;
-    if (src === chat_completion_sources.CLAUDE) return 'Claude';
-    if (src === chat_completion_sources.MAKERSUITE) return 'Google AI Studio';
-    if (src === chat_completion_sources.VERTEXAI) return 'Vertex AI';
-    return 'Unknown';
+    const heading = document.createElement('h4');
+    heading.textContent = translate(titleKey);
+    section.append(heading);
+
+    const textarea = document.createElement('textarea');
+    textarea.classList.add('text_pole');
+    textarea.rows = rows;
+    textarea.placeholder = translate(descriptionKey);
+    textarea.value = value || '';
+    section.append(textarea);
+
+    return { section, textarea };
 }
 
 async function onAdditionalParametersClick() {
-    const providerKey = getCurrentProviderKey();
-    if (!providerKey) return;
+    const provider = getCurrentProvider();
+    if (!provider) {
+        return;
+    }
 
-    const cfg = settings[providerKey];
-    const label = getProviderLabel();
+    const config = settings[provider.key];
+    const popup = document.createElement('div');
+    popup.classList.add('gcap--popup');
 
-    // Build popup DOM
-    const dom = document.createElement('div');
-    dom.classList.add('gcap--popup');
+    const heading = document.createElement('h3');
+    heading.textContent = `${translate('Additional Parameters')}: ${getCurrentProviderLabel(provider)}`;
+    popup.append(heading);
 
-    const header = document.createElement('h3');
-    header.textContent = `Additional Parameters: ${label}`;
-    dom.append(header);
+    const includeBody = createSection('Include Body Parameters', 'custom_include_body_desc', 6, config.include_body);
+    const excludeBody = createSection('Exclude Body Parameters', 'custom_exclude_body_desc', 4, config.exclude_body);
+    const includeHeaders = createSection('Include Request Headers', 'custom_include_headers_desc', 4, config.include_headers);
+    popup.append(includeBody.section, excludeBody.section, includeHeaders.section);
 
-    // --- Include Body ---
-    const sec1 = document.createElement('div');
-    sec1.classList.add('gcap--section');
-    const h4_1 = document.createElement('h4');
-    h4_1.textContent = 'Include Body Parameters';
-    sec1.append(h4_1);
-    const ta1 = document.createElement('textarea');
-    ta1.classList.add('text_pole');
-    ta1.rows = 6;
-    ta1.placeholder =
-        'Parameters to be merged into the request body (YAML object)\n\n' +
-        'Example:\n' +
-        'top_k: 20\n' +
-        'repetition_penalty: 1.1';
-    ta1.value = cfg.include_body || '';
-    sec1.append(ta1);
-    dom.append(sec1);
-
-    // --- Exclude Body ---
-    const sec2 = document.createElement('div');
-    sec2.classList.add('gcap--section');
-    const h4_2 = document.createElement('h4');
-    h4_2.textContent = 'Exclude Body Parameters';
-    sec2.append(h4_2);
-    const ta2 = document.createElement('textarea');
-    ta2.classList.add('text_pole');
-    ta2.rows = 4;
-    ta2.placeholder =
-        'Parameters to be removed from the request body (YAML array)\n\n' +
-        'Example:\n' +
-        '- frequency_penalty\n' +
-        '- presence_penalty';
-    ta2.value = cfg.exclude_body || '';
-    sec2.append(ta2);
-    dom.append(sec2);
-
-    // --- Include Headers ---
-    const sec3 = document.createElement('div');
-    sec3.classList.add('gcap--section');
-    const h4_3 = document.createElement('h4');
-    h4_3.textContent = 'Include Request Headers';
-    sec3.append(h4_3);
-    const ta3 = document.createElement('textarea');
-    ta3.classList.add('text_pole');
-    ta3.rows = 4;
-    ta3.placeholder =
-        'Additional headers for API requests (YAML object)\n\n' +
-        'Example:\n' +
-        'anthropic-beta: max-tokens-3-5-sonnet-2024-07-15';
-    ta3.value = cfg.include_headers || '';
-    sec3.append(ta3);
-    dom.append(sec3);
-
-    // Show popup
-    const result = await callGenericPopup(dom, POPUP_TYPE.TEXT, null, {
+    const result = await callGenericPopup(popup, POPUP_TYPE.TEXT, null, {
         okButton: 'Save',
         wide: true,
         large: true,
     });
 
     if (result === POPUP_RESULT.AFFIRMATIVE) {
-        cfg.include_body = ta1.value;
-        cfg.exclude_body = ta2.value;
-        cfg.include_headers = ta3.value;
+        config.include_body = includeBody.textarea.value;
+        config.exclude_body = excludeBody.textarea.value;
+        config.include_headers = includeHeaders.textarea.value;
         saveSettings();
     }
 }
 
-// =============================================
-// UI – inject button into the shared button bar
-// =============================================
+function injectButton() {
+    const testButton = document.querySelector('#test_api_button');
+    if (!testButton) {
+        console.warn('[GCAP] Could not find #test_api_button to inject Additional Parameters button');
+        return;
+    }
 
-// The target is the flex-container that holds Connect / Cancel / Additional Parameters (custom) / Test Message.
-// We insert a new button right before #test_api_button, with data-source so ST toggles it automatically.
-const testBtn = document.querySelector('#test_api_button');
-if (testBtn) {
-    const btn = document.createElement('div');
-    btn.id = 'gcap_additional_parameters';
-    // data-source accepts comma-separated values; ST's toggleChatCompletionForms() handles visibility
-    btn.setAttribute('data-source', 'claude,makersuite,vertexai');
-    btn.classList.add('menu_button', 'menu_button_icon');
-    btn.textContent = 'Additional Parameters';
-    btn.addEventListener('click', onAdditionalParametersClick);
-    testBtn.parentElement.insertBefore(btn, testBtn);
-} else {
-    console.warn('[GCAP] Could not find #test_api_button to inject Additional Parameters button');
+    const existingButton = document.querySelector('#gcap_additional_parameters');
+    if (existingButton) {
+        additionalParametersButton = existingButton;
+        return;
+    }
+
+    additionalParametersButton = document.createElement('div');
+    additionalParametersButton.id = 'gcap_additional_parameters';
+    additionalParametersButton.classList.add('menu_button', 'menu_button_icon');
+    additionalParametersButton.textContent = translate('Additional Parameters');
+    additionalParametersButton.addEventListener('click', onAdditionalParametersClick);
+    testButton.parentElement.insertBefore(additionalParametersButton, testButton);
 }
+
+async function getRuntimeDependencies() {
+    let scriptModule;
+    try {
+        scriptModule = await import('/script.js');
+    } catch (error) {
+        console.error('[GCAP] Failed to load /script.js:', error);
+        return null;
+    }
+
+    let { eventSource, event_types: eventTypes } = scriptModule;
+    if (!eventSource || !eventTypes) {
+        try {
+            ({ eventSource, event_types: eventTypes } = await import('/scripts/events.js'));
+        } catch (error) {
+            console.error('[GCAP] Failed to load event dependencies:', error);
+            return null;
+        }
+    }
+
+    if (typeof scriptModule.saveSettingsDebounced !== 'function' || typeof eventSource?.on !== 'function') {
+        console.error('[GCAP] Required SillyTavern dependencies are unavailable; extension was not initialized.');
+        return null;
+    }
+
+    return {
+        saveSettings: scriptModule.saveSettingsDebounced,
+        eventSource,
+        settingsReadyEvent: eventTypes?.CHAT_COMPLETION_SETTINGS_READY ?? 'chat_completion_settings_ready',
+    };
+}
+
+async function init() {
+    const dependencies = await getRuntimeDependencies();
+    if (!dependencies) {
+        return;
+    }
+
+    saveSettingsDebounced = dependencies.saveSettings;
+    dependencies.eventSource.on(dependencies.settingsReadyEvent, applyAdditionalParameters);
+
+    injectButton();
+    refreshButtonVisibility();
+    $('#chat_completion_source').off('change.gcap').on('change.gcap', refreshButtonVisibility);
+}
+
+void init();
