@@ -1,11 +1,11 @@
 {
-    "display_name": "Chat Completion Additional Parameters",
+    "display_name": "Additional Parameters for More Chat Completion Sources",
     "loading_order": 101,
     "requires": [],
     "optional": [],
     "js": "index.js",
     "css": "style.css",
-    "author": "User",
-    "version": "1.0.0",
+    "author": "fox",
+    "version": "1.1.0",
     "homePage": ""
 }
