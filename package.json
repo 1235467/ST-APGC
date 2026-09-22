@@ -1,0 +1,12 @@
+{
+    "name": "st-apgc",
+    "private": true,
+    "version": "1.1.0",
+    "description": "Additional Parameters for More Chat Completion Sources — SillyTavern extension",
+    "scripts": {
+        "build": "node tools/build.mjs"
+    },
+    "devDependencies": {
+        "esbuild": "^0.25.0"
+    }
+}
